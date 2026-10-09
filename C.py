@@ -4,6 +4,12 @@ import json
 import os
 from datetime import datetime
 from openai import OpenAI
+from datetime import datetime
+import streamlit as st
+
+# 放在C.py最开头
+if "start_timestamp" not in st.session_state:
+    st.session_state.start_timestamp = None
 
 # ===================== 全局配置 CSS美化 =====================
 st.set_page_config(
@@ -142,19 +148,25 @@ for idx, item in enumerate(mock_top5_goods):
         st.markdown(f"📋 参数：{item['param']}")
         st.markdown(f"⭐ 评分：{item['score']}")
         st.write("")
-        if st.button("✅选择此商品", key=f"goods_btn_{item['id']}"):
+        if st.button(label="✅ 选择此商品", key=f"goods_btn_{item['id']}"):
             end_time = datetime.now()
-            delta_sec = (end_time - st.session_state.start_timestamp).total_seconds()
-            record = {
-                "user_id": st.session_state.user_unique_id,
-                "ai_style": st.session_state.selected_style,
-                "selected_goods_id": item["id"],
-                "selected_goods_name": item["name"],
-                "start_time": str(st.session_state.start_timestamp),
-                "end_time": str(end_time),
-                "decision_cost_second": round(delta_sec,2)
-            }
-            st.session_state.click_record.append(record)
+            # 增加判断，解决None报错
+            if st.session_state.start_timestamp is not None:
+                delta_sec = (end_time - st.session_state.start_timestamp).total_seconds()
+                record = {
+                    "user_id": st.session_state.user_unique_id,
+                    "ai_style": st.session_state.selected_style,
+                    "selected_goods_id": item["id"],
+                    "selected_goods_name": item["name"],
+                    "start_time": str(st.session_state.start_timestamp),
+                    "end_time": str(end_time),
+                    "decision_cost_second": round(delta_sec, 2)
+                }
+                st.session_state.click_record.append(record)
+                st.success(f"已记录，耗时：{delta_sec:.2f}秒")
+            else:
+                st.warning("请先点击【开始】，再选择商品！")
+
             st.toast(f"已选择：{item['name']}，耗时 {delta_sec:.2f} 秒")
         st.markdown("</div>",unsafe_allow_html=True)
 
