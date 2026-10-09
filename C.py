@@ -4,12 +4,6 @@ import json
 import os
 from datetime import datetime
 from openai import OpenAI
-from datetime import datetime
-import streamlit as st
-
-# 放在C.py最开头
-if "start_timestamp" not in st.session_state:
-    st.session_state.start_timestamp = None
 
 # ===================== 全局配置 CSS美化 =====================
 st.set_page_config(
@@ -100,8 +94,8 @@ st.divider()
 st.subheader("📌 步骤1：选择AI交互风格")
 choose_style = st.radio("切换AI助手人格风格", style_list, horizontal=True)
 
-# 切换风格时：重置聊天记录！不同实验组对话隔离
-if choose_style != st.session_state.selected_style:
+# 切换风格 OR 首次进入页面，自动启动计时
+if choose_style != st.session_state.selected_style or st.session_state.start_timestamp is None:
     st.session_state.selected_style = choose_style
     st.session_state.start_timestamp = datetime.now()
     st.session_state.chat_history = []
@@ -150,7 +144,7 @@ for idx, item in enumerate(mock_top5_goods):
         st.write("")
         if st.button(label="✅ 选择此商品", key=f"goods_btn_{item['id']}"):
             end_time = datetime.now()
-            # 增加判断，解决None报错
+            # 捕获错误：未选择风格/计时未启动时弹出提醒，不崩溃
             if st.session_state.start_timestamp is not None:
                 delta_sec = (end_time - st.session_state.start_timestamp).total_seconds()
                 record = {
@@ -164,17 +158,16 @@ for idx, item in enumerate(mock_top5_goods):
                 }
                 st.session_state.click_record.append(record)
                 st.success(f"已记录，耗时：{delta_sec:.2f}秒")
+                st.toast(f"已选择：{item['name']}，耗时 {delta_sec:.2f} 秒")
             else:
-                st.warning("请先点击【开始】，再选择商品！")
-
-            st.toast(f"已选择：{item['name']}，耗时 {delta_sec:.2f} 秒")
+                st.warning("⚠️请按照实验步骤操作：先选择AI交互风格，再进行商品选择！")
         st.markdown("</div>",unsafe_allow_html=True)
 
 st.divider()
 st.subheader("📊 后台埋点行为日志（调试）")
 st.dataframe(st.session_state.click_record, use_container_width=True)
 if st.button("💾【调试】导出埋点JSON"):
-    with open("behavior_log.json","w",encoding="utf‑8") as f:
+    with open("behavior_log.json","w",encoding="utf-8") as f:
         json.dump(st.session_state.click_record, f, ensure_ascii=False, indent=2)
     st.success("behavior_log.json已保存")
 
