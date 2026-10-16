@@ -7,7 +7,7 @@ from datetime import datetime
 from openai import OpenAI
 
 # ===================== API配置区 =====================
-API_KEY = ""
+API_KEY = "sk-5b7012f46bbb422eaba65a0763118dd1"
 BASE_URL = "https://api.deepseek.com"
 MODEL_NAME = "deepseek-flash"
 
