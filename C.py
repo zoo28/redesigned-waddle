@@ -91,46 +91,201 @@ st.set_page_config(
 
 custom_css = """
 <style>
-.main {background-color:#f7f9fc;}
+/* ========== 全局背景：渐变+圆点花纹，铺满全屏 ========== */
+.stApp {
+    background:
+        radial-gradient(circle at 15% 20%, rgba(100, 150, 210, 0.38) 0 3px, transparent 5px),
+        radial-gradient(circle at 85% 12%, rgba(255, 190, 130, 0.32) 0 3px, transparent 5px),
+        radial-gradient(circle at 78% 82%, rgba(110, 200, 170, 0.35) 0 3px, transparent 5px),
+        radial-gradient(circle at 25% 78%, rgba(140, 175, 230, 0.30) 0 2.5px, transparent 4.5px),
+        radial-gradient(circle at 55% 55%, rgba(255, 215, 150, 0.28) 0 2px, transparent 4px),
+        linear-gradient(135deg, #e1eefc 0%, #cfe0f7 50%, #f7ecd8 100%);
+    background-size: 220px 220px, 190px 190px, 250px 250px, 210px 210px, 170px 170px, 100% 100%;
+    background-attachment: fixed;
+    background-repeat: repeat, repeat, repeat, repeat, repeat, no-repeat;
+    min-height: 100vh;
+}
+
+/* ========== 内容容器 ========== */
 .block-container {
-    padding-top: 1rem;
-    padding-left: 1.5rem;
-    padding-right: 1.5rem;
+    padding-top: 1.2rem;
+    padding-left: 2rem;
+    padding-right: 2rem;
+    max-width: 1480px;
+    position: relative;
+    z-index: 1;
 }
-.good-card{
-    background:#ffffff;
-    border-radius:12px;
-    padding:14px;
-    box-shadow:0 2px 10px rgba(0,0,0,0.08);
-    min-height:auto !important;
+
+/* ========== 用户ID信息框 ========== */
+.info-box {
+    background: linear-gradient(90deg, #d4e7ff, #eaf4ff);
+    border-left: 7px solid #3a73b5;
+    border-radius: 14px;
+    padding: 14px 20px;
+    box-shadow: 0 6px 18px rgba(70, 120, 190, 0.24);
+    position: relative;
+    z-index: 1;
 }
-.info-box{background:#e8f0fe;padding:12px 16px;border-radius:8px;border-left:4px #2b7bba solid;}
-.consent-box{background:#ffffff;padding:2rem;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,0.07);max-width:720px;margin:0 auto;}
-/* 卡片内expander去除边框，适配卡片样式 */
-[data-testid="stExpander"]{
-    border:none !important;
-    box-shadow:none !important;
+.info-box code {
+    font-size: 15px;
+    color: #1b3655;
+    font-weight: 500;
 }
-[data-testid="stExpander"] details summary p{
-    font-size:14px;
-    color:#2b7bba;
+
+/* ========== 商品卡片：边框明显+hover上浮动效 ========== */
+.good-card {
+    background: #ffffff;
+    border-radius: 20px;
+    padding: 16px;
+    box-shadow: 0 10px 28px rgba(70, 120, 190, 0.30);
+    border: 2px solid #b0caf0;
+    transition: all 0.35s ease;
+    position: relative;
+    z-index: 1;
+    overflow: hidden;
 }
-/* 任务情境：美化 Markdown 引用块（Streamlit 原生解析，不能用 div 包 Markdown） */
-[data-testid="stMarkdownContainer"] blockquote{
-    background:#f5f9ff;
-    border-left:4px solid #2b7bba;
-    border-radius:8px;
-    padding:14px 20px;
-    margin:10px 0 16px 0;
-    line-height:1.95;
-    font-size:15px;
-    color:#33465c;
+.good-card:hover {
+    transform: translateY(-6px);
+    box-shadow: 0 20px 44px rgba(50, 100, 180, 0.48);
+    border-color: #528fd4;
 }
-[data-testid="stMarkdownContainer"] blockquote p{
-    margin:4px 0;
+
+/* ========== 商品图片：hover放大动效 ========== */
+.good-card img {
+    border-radius: 14px;
+    transition: transform 0.4s ease;
+    display: block;
+    margin: 0 auto !important;
+    width: 100%;
+}
+.good-card:hover img {
+    transform: scale(1.05);
+}
+
+/* ========== 折叠面板（卖点） ========== */
+[data-testid="stExpander"] {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+}
+[data-testid="stExpander"] details summary p {
+    font-size: 14.5px;
+    color: #2f6aa8;
+    font-weight: 700;
+}
+
+/* ========== 按钮美化 ========== */
+.stButton > button {
+    border-radius: 12px;
+    transition: all 0.25s ease;
+    border: 1px solid #8cb6e5;
+    font-weight: 600;
+}
+.stButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(50, 100, 180, 0.42);
+    border-color: #3a73b5;
+}
+
+/* ========== 聊天气泡 ========== */
+[data-testid="stChatMessage"] {
+    border-radius: 16px;
+    background-color: rgba(255, 255, 255, 0.96);
+    border: 1px solid #c2d6f0;
+}
+[data-testid="stChatMessage"] [data-testid="stChatMessageContent"] {
+    padding: 0.5rem 0.7rem;
+}
+
+/* ========== 分隔线 ========== */
+hr {
+    border-color: #b0caf0 !important;
+    border-width: 1.8px !important;
+    margin: 1.4rem 0 !important;
+}
+/* ========== 底部输入框美化：渐变蓝背景 ========== */
+[data-testid="stChatInput"] {
+    border: 2px solid #b0caf0 !important;
+    border-radius: 16px !important;
+    background: linear-gradient(135deg, #f3f8ff, #e8f1fc) !important;
+    box-shadow: 0 8px 24px rgba(70, 120, 190, 0.28) !important;
+    padding: 10px 14px !important;
+    transition: all 0.3s ease !important;
+}
+
+[data-testid="stChatInput"]:hover {
+    border-color: #528fd4 !important;
+    background: linear-gradient(135deg, #eef5ff, #ddeaf8) !important;
+    box-shadow: 0 12px 32px rgba(50, 100, 180, 0.38) !important;
+    transform: translateY(-2px);
+}
+
+[data-testid="stChatInput"]:focus-within {
+    border-color: #3a73b5 !important;
+    background: linear-gradient(135deg, #eaf3ff, #d7e6f7) !important;
+    box-shadow: 0 14px 36px rgba(50, 100, 180, 0.45) !important;
+}
+
+[data-testid="stChatInput"] textarea {
+    border: none !important;
+    outline: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    color: #203855;
+    font-size: 15px;
+}
+
+[data-testid="stChatInput"] button {
+    border-radius: 10px !important;
+    border: 1px solid #8cb6e5 !important;
+    background: linear-gradient(135deg, #d4e7ff, #b9d4f5) !important;
+    color: #1b3655 !important;
+    font-weight: 600;
+    transition: all 0.25s ease;
+}
+
+[data-testid="stChatInput"] button:hover {
+    background: linear-gradient(135deg, #b9d4f5, #95b8e8) !important;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(50, 100, 180, 0.35);
+}
+
+
+/* ========== 任务情境引用块 ========== */
+[data-testid="stMarkdownContainer"] blockquote {
+    background: linear-gradient(180deg, #e6f1ff, #ffffff);
+    border-left: 6px solid #3a73b5;
+    border-radius: 12px;
+    padding: 16px 22px;
+    line-height: 2;
+    font-size: 15.5px;
+    color: #203855;
+    box-shadow: 0 6px 18px rgba(70, 120, 190, 0.22);
+    border: 1px solid #c2d6f0;
+    margin: 12px 0 18px 0;
+}
+[data-testid="stMarkdownContainer"] blockquote p {
+    margin: 6px 0;
+}
+
+/* ========== 二级标题 ========== */
+h2, [data-testid="stMarkdownContainer"] h2 {
+    color: #1b3655;
+    font-weight: 700;
+}
+
+/* ========== st.info 提示框 ========== */
+[data-testid="stAlert"] {
+    border-radius: 12px;
+    background-color: #e0edff;
+    border: 1px solid #9fc0e8;
 }
 </style>
 """
+
+
+
 st.markdown(custom_css, unsafe_allow_html=True)
 
 # ===================== 会话状态初始化 =====================
@@ -189,7 +344,7 @@ if not st.session_state.agreed:
 @st.cache_data
 def load_product_json():
     """读取top5_recommendations_zh.json，提取products数组"""
-    with open("top5_recommendations_zh.json", "r", encoding="utf-8") as f:
+    with open("../../xwechat_files/wxid_lel22wtb9u8h22_b673/msg/file/2026-10/top5_recommendations_zh.json", "r", encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, str):
         data = json.loads(data)
@@ -360,7 +515,7 @@ st.divider()
 st.subheader("📝 步骤4：完成实验填写问卷")
 uid = st.session_state.user_unique_id
 style = st.session_state.selected_style
-questionnaire_base_url = "https://v.wjx.cn/vm/eWrccpZ.aspx#"
+questionnaire_base_url = "https://v.wjx.cn/vm/efckW5Y.aspx#"
 full_url = f"{questionnaire_base_url}?userid={uid}&aistyle={style}"
 st.markdown(f"> 携带ID问卷链接：`{full_url}`")
 st.link_button("👉跳转填写实验问卷", url=full_url, type="primary")
