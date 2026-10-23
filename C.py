@@ -515,7 +515,7 @@ st.divider()
 st.subheader("📝 步骤4：完成实验填写问卷")
 uid = st.session_state.user_unique_id
 style = st.session_state.selected_style
-questionnaire_base_url = "https://v.wjx.cn/vm/efckW5Y.aspx#"
+questionnaire_base_url = "https://v.wjx.cn/vm/hN66cXZ.aspx#"
 full_url = f"{questionnaire_base_url}?userid={uid}&aistyle={style}"
 st.markdown(f"> 携带ID问卷链接：`{full_url}`")
 st.link_button("👉跳转填写实验问卷", url=full_url, type="primary")
