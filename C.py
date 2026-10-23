@@ -344,7 +344,7 @@ if not st.session_state.agreed:
 @st.cache_data
 def load_product_json():
     """读取top5_recommendations_zh.json，提取products数组"""
-    with open("../../xwechat_files/wxid_lel22wtb9u8h22_b673/msg/file/2026-10/top5_recommendations_zh.json", "r", encoding="utf-8") as f:
+    with open("top5_recommendations_zh.json", "r", encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, str):
         data = json.loads(data)
