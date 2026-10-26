@@ -8,14 +8,36 @@ from openai import OpenAI
 import urllib.request          # 新增：用于把埋点上报到云端数据库
 
 # ===================== API配置区 =====================
-API_KEY = "sk-05a5a11ed9da4e3ea16c17b0ed6bfc01"
-BASE_URL = "https://api.deepseek.com"
-MODEL_NAME = "deepseek-flash"
+# 平台：OpenRouter（key 以 sk-or-v1- 开头），聚合多个模型供应商。
+# 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名也必须带前缀。
+API_KEY = "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"
+BASE_URL = "https://openrouter.ai/api/v1"
+# deepseek/deepseek-v4.1-flash：OpenRouter 上 flash 档中定价最低的一档
+# （输入 $0.020/M、输出 $1.000/M）。实测可正常调用。
+MODEL_NAME = "deepseek/deepseek-v4.1-flash"
 
 client = OpenAI(
     api_key=API_KEY,
-    base_url=BASE_URL
+    base_url=BASE_URL,
+    default_headers={                    # OpenRouter 要求/建议带上来源标识
+        "HTTP-Referer": "https://localhost",
+        "X-Title": "D1-Experiment",
+    },
 )
+
+# ---------- 成本控制参数 ----------
+# 1) 关闭推理链。OpenRouter 的写法是 reasoning.effort="none"，
+#    实测：开启时 54 tokens 且答案被思考挤空；关闭后 10 tokens 且正常返回。
+#    （DeepSeek 官方接口的 thinking.type 写法在 OpenRouter 上不适用）
+ENABLE_THINKING = False
+
+# 2) 单次回复最大长度。设 600 是为了让"理性分析型"列商品对比时不被截断；
+#    若实测输出都很短，可再压到 400 进一步省钱。
+MAX_OUTPUT_TOKENS = 600
+
+# 3) 历史对话只带最近 N 条（一问一答算 2 条）。
+#    原先全量累积，聊到第 10 轮时光历史就上千 token。
+MAX_HISTORY_MESSAGES = 6
 
 # ===================== 埋点数据库配置（Supabase）=====================
 # 说明：publishable key 是公开性质的低权限密钥，只允许【插入】、不允许【读取】，
@@ -364,18 +386,83 @@ image_map = {
 }
 
 # ===================== 拼接商品文本，供给AI Prompt =====================
+def _one_product_text(p):
+    """单件商品的文本。卖点截到 120 字，避免长卖点把 token 撑爆。"""
+    feats = (p.get("features_text_zh") or "")[:120]
+    return (f"【{p['product_id']}】{p['name_zh']} | 价格${p['price_usd']} | "
+            f"类目:{p['category_family_zh']} | cbf_score:{p['cbf_score']} | "
+            f"卖点：{feats}")
+
+
 def get_products_text():
-    lines = []
+    """全量商品文本（保留原有行为，供兜底使用）"""
+    return "\n".join(_one_product_text(p) for p in product_list if isinstance(p, dict))
+
+
+product_full_text = get_products_text()
+
+# ---------- 按需发送商品，节省 token ----------
+# 原理：被试通常只关心一两件商品，没必要每次把五件全部塞进上下文。
+# 策略：先从用户输入里匹配被提及的商品（按名称片段 / 商品ID / 序号），
+#      若匹配到 1~2 件就只发这几件；匹配不到或问了"哪件更好/推荐哪个"
+#      这类跨商品问题，就发精简版全量。
+CROSS_PRODUCT_HINTS = ["哪件", "哪个", "推荐", "这几件", "五件", "全部", "对比",
+                       "比较", "选择", "都", "最好", "最合适", "划算"]
+
+
+def pick_products_for_prompt(user_text: str):
+    """返回本次请求要发往模型的商品列表"""
+    t = user_text or ""
+    # 1) 明确提到"全部/对比/哪件"这类词 -> 发全量
+    if any(h in t for h in CROSS_PRODUCT_HINTS):
+        return product_list, "全量(跨商品提问)"
+
+    # 2) 按商品ID前缀匹配，如 P001 / P003
+    by_id = [p for p in product_list
+             if isinstance(p, dict) and p.get("product_id", "")[:4] in t]
+    if by_id:
+        return by_id[:2], "按ID命中%d件" % len(by_id[:2])
+
+    # 3) 按关键词匹配：用每件商品的特征词表（比整名切片更贴近被试说法）
+    #    特征词来自商品名中的核心名词 + 人工补充的常见口语说法
+    KEYS = {
+        "P001-B01DTIFMSO": ["数学", "练习", "VersaTiles", "hand2mind", "一年级", "答题盒", "练习册"],
+        "P002-B005Q16MDW": ["背心", "训练", "运动", "分队", "BlueDot", "Pinnie"],
+        "P003-B01FLNRQYS": ["地毯", "乘除", "地垫", "教室", "Flagship", "Rug"],
+        "P004-B0792T5T77": ["软木", "积木", "KORXX", "ECR4Kids", "搭建", "玩具块"],
+        "P005-B01ECLZC1O": ["美甲", "指甲", "手工", "Alex", "甲油", "贴纸"],
+    }
+    by_key = []
     for p in product_list:
         if not isinstance(p, dict):
             continue
-        line = (f"【{p['product_id']}】{p['name_zh']} | 价格${p['price_usd']} | "
-                f"类目:{p['category_family_zh']} | 匹配分数cbf_score:{p['cbf_score']} | "
-                f"卖点：{p['features_text_zh']}")
-        lines.append(line)
-    return "\n".join(lines)
+        pid = p.get("product_id", "")
+        words = KEYS.get(pid, [])
+        # 有些被试会直接用英文名片段，兜底从 name 里取英文词
+        if any(w.lower() in t.lower() for w in words):
+            by_key.append(p)
+    if by_key:
+        return by_key[:2], "按关键词命中%d件" % len(by_key[:2])
 
-product_full_text = get_products_text()
+    # 4) 按"第一件/第二件"这类序号
+    order_words = [("第一", 0), ("第二", 1), ("第三", 2), ("第四", 3), ("第五", 4)]
+    for w, idx in order_words:
+        if (w + "件") in t or (w + "个") in t:
+            if idx < len(product_list):
+                return [product_list[idx]], "按序号命中第%d件" % (idx + 1)
+
+    # 5) 都没命中 -> 发全量
+    return product_list, "全量(未命中具体商品)"
+
+    # 5) 都没命中 -> 发全量
+    return product_list, "全量(未命中具体商品)"
+
+
+def build_products_block(user_text: str):
+    """按需构建商品块，并返回命中的商品ID（用于记录）"""
+    picked, why = pick_products_for_prompt(user_text)
+    block = "\n".join(_one_product_text(p) for p in picked)
+    return block, [p.get("product_id") for p in picked], why
 
 # ===================== AI三种人格Prompt =====================
 style_prompt_dict = {
@@ -485,18 +572,33 @@ if user_input:
 
     sys_prompt = style_prompt_dict[st.session_state.selected_style]
 
+    # ---------- 按需构建商品上下文（省钱核心之一）----------
+    # 原先每次都把五件商品全量发过去；现在只发用户确实问到的那几件。
+    products_block, picked_ids, pick_why = build_products_block(user_input)
+    st.session_state.last_prompt_products = len(picked_ids)   # 调试用
+
     # 真实API调用
     messages_api = [
-        {"role":"system", "content": sys_prompt + "\n商品库:\n" + product_full_text[:1400]}
+        {"role": "system", "content": sys_prompt + "\n商品库:\n" + products_block}
     ]
-    messages_api.extend(st.session_state.chat_history)
+    # ---------- 历史对话只带最近 N 条（省钱核心之二）----------
+    # 原先全量累积，聊到第 10 轮时光历史就上千 token。
+    history_tail = st.session_state.chat_history[-MAX_HISTORY_MESSAGES:] \
+        if MAX_HISTORY_MESSAGES > 0 else []
+    messages_api.extend(history_tail)
 
     with st.chat_message("assistant"):
         stream = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages_api,
             stream=True,
-            temperature=0.3
+            temperature=0.3,
+            max_tokens=MAX_OUTPUT_TOKENS,                       # 限制输出长度
+            extra_body={
+                # OpenRouter 的推理开关：effort="none" 即关闭推理链。
+                # 注：DeepSeek 官方接口用的 thinking.type 写法在 OpenRouter 上无效。
+                "reasoning": {"effort": "high" if ENABLE_THINKING else "none"}
+            },
         )
         ai_response = st.write_stream(stream)
     st.session_state.chat_history.append({"role":"assistant","content":ai_response})
@@ -519,3 +621,21 @@ questionnaire_base_url = "https://v.wjx.cn/vm/hN66cXZ.aspx#"
 full_url = f"{questionnaire_base_url}?userid={uid}&aistyle={style}"
 st.markdown(f"> 携带ID问卷链接：`{full_url}`")
 st.link_button("👉跳转填写实验问卷", url=full_url, type="primary")
+
+# ===================== 问卷二维码 =====================
+# 用途：手机端被试扫码填写更方便；二维码与上方按钮指向同一个问卷地址。
+# 注意：qrcode.jpg 必须与 C.py 放在同一目录。
+st.markdown(
+    """
+<div style="margin-top:1.2rem;">
+    <p style="font-size:14px; color:#203855; margin-bottom:8px;">
+        📱 您也可以使用手机扫描下方二维码填写问卷：
+    </p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+qr_col1, qr_col2, qr_col3 = st.columns([1, 1, 1])
+with qr_col2:
+    st.image("qrcode.jpg", width=220)
