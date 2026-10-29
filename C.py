@@ -10,13 +10,17 @@ import urllib.request          # 新增：用于把埋点上报到云端数据�
 # ===================== API配置区 =====================
 # 平台：OpenRouter（key 以 sk-or-v1- 开头），聚合多个模型供应商。
 # 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名必须带 :free 之类的后缀。
-API_KEY = "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"
+API_KEY = "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"
 BASE_URL = "https://openrouter.ai/api/v1"
-# nvidia/nemotron-3.5-lightning:free
-#   实测：cost=0（真免费）、推理可关闭、中文正常、遵守"只引用给定事实"约束。
-#   替代候选若此模型挂了，可换 google/gemma-4-31b-it:free（注意会被上游限流 429）。
-#   不要用 recursive/flint-v1.0:free —— 该端点强制开启推理链，与本代码冲突（HTTP 400）。
-MODEL_NAME = "nvidia/nemotron-3.5-lightning:free"
+# recursive/flint-v1.0:free —— 实测最佳，响应约 2~3 秒（比免费 nemotron 快 30 倍）
+#   实测：cost=0（真免费）、中文正常、价格引用准确。
+#   该模型的两条特殊约束，下面已专门处理，改动时不要破坏：
+#     1) 推理【无法关闭】，传 effort="none" 会直接 HTTP 400；
+#        因此 REASONING_EFFORT 只能设为 "low"。
+#     2) 每轮会消耗约 70~80 个推理 token，max_tokens 太小会把答案挤空
+#        （实测 max_tokens=200 时返回 content=None），故默认值调到 2000。
+#   备用：nvidia/nemotron-3.5-lightning:free（可关闭推理，但单次约 70 秒）
+MODEL_NAME = "recursive/flint-v1.0:free"
 
 client = OpenAI(
     api_key=API_KEY,
@@ -28,14 +32,18 @@ client = OpenAI(
 )
 
 # ---------- 成本控制参数 ----------
-# 1) 关闭推理链。OpenRouter 的写法是 reasoning.effort="none"，
-#    实测：开启时 54 tokens 且答案被思考挤空；关闭后 10 tokens 且正常返回。
-#    （DeepSeek 官方接口的 thinking.type 写法在 OpenRouter 上不适用）
-ENABLE_THINKING = False
+# 1) 推理强度。OpenRouter 的写法是 reasoning.effort。
+#    ⚠️ flint 无法关闭推理（传 "none" 会 HTTP 400: Reasonable is mandatory），
+#       因此这里只能传 "low"，它会把推理压到约 70~80 token，速度最快。
+#    若换成 nemotron 这类可关闭推理的模型，可把 REASONING_EFFORT 改成 "none"。
+REASONING_EFFORT = "low"
 
-# 2) 单次回复最大长度。设 600 是为了让"理性分析型"列商品对比时不被截断；
-#    若实测输出都很短，可再压到 400 进一步省钱。
-MAX_OUTPUT_TOKENS = 600
+# 2) 单次回复最大长度。
+#    ⚠️ 必须给足空间：flint 会先用掉约 80 个推理 token，
+#       实测 max_tokens=200 时返回 content=None（答案被思考挤空）；
+#       1500 起才稳定返回完整答案。这里设 2000 留足余量。
+#    由于本模型免费，加大 max_tokens 不增加成本。
+MAX_OUTPUT_TOKENS = 2000
 
 # 3) 历史对话只带最近 N 条（一问一答算 2 条）。
 #    原先全量累积，聊到第 10 轮时光历史就上千 token。
@@ -611,21 +619,20 @@ if user_input:
     st.session_state.chat_history.append({"role": "user", "content": user_input})
 
     with st.chat_message("assistant"):
-        # ---- 免费模型延迟很长（实测单次约 70 秒），先给出等待提示，避免被试以为卡死 ----
+        # ---- 给出等待提示，避免页面看起来卡死（flint 通常 2~3 秒返回）----
         tip = st.empty()
-        tip.caption("⏳ 助手正在思考，请稍候…（免费模型响应较慢，可能需要约一分钟）")
+        tip.caption("⏳ 助手正在思考，请稍候…")
         try:
             stream = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=messages_api,
                 stream=True,
                 temperature=0.3,
-                max_tokens=MAX_OUTPUT_TOKENS,                       # 限制输出长度
-                timeout=180,                                        # 免费模型慢，放宽到3分钟
+                max_tokens=MAX_OUTPUT_TOKENS,                       # 必须给足，flint 会消耗推理token
+                timeout=120,
                 extra_body={
-                    # OpenRouter 的推理开关：effort="none" 即关闭推理链。
-                    # 注：DeepSeek 官方接口用的 thinking.type 写法在 OpenRouter 上无效。
-                    "reasoning": {"effort": "high" if ENABLE_THINKING else "none"}
+                    # OpenRouter 的推理强度。flint 唯一允许的值是 low（不能用 none）。
+                    "reasoning": {"effort": REASONING_EFFORT}
                 },
             )
             tip.empty()
@@ -686,4 +693,5 @@ st.markdown(
 
 qr_col1, qr_col2, qr_col3 = st.columns([1, 1, 1])
 with qr_col2:
+    st.image("qrcode.jpg", width=220)
     st.image("qrcode.jpg", width=220)
