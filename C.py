@@ -9,12 +9,14 @@ import urllib.request          # 新增：用于把埋点上报到云端数据�
 
 # ===================== API配置区 =====================
 # 平台：OpenRouter（key 以 sk-or-v1- 开头），聚合多个模型供应商。
-# 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名也必须带前缀。
-API_KEY = "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"
+# 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名必须带 :free 之类的后缀。
+API_KEY = "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"
 BASE_URL = "https://openrouter.ai/api/v1"
-# deepseek/deepseek-v4.1-flash：OpenRouter 上 flash 档中定价最低的一档
-# （输入 $0.020/M、输出 $1.000/M）。实测可正常调用。
-MODEL_NAME = "deepseek/deepseek-v4.1-flash"
+# nvidia/nemotron-3.5-lightning:free
+#   实测：cost=0（真免费）、推理可关闭、中文正常、遵守"只引用给定事实"约束。
+#   替代候选若此模型挂了，可换 google/gemma-4-31b-it:free（注意会被上游限流 429）。
+#   不要用 recursive/flint-v1.0:free —— 该端点强制开启推理链，与本代码冲突（HTTP 400）。
+MODEL_NAME = "nvidia/nemotron-3.5-lightning:free"
 
 client = OpenAI(
     api_key=API_KEY,
@@ -387,8 +389,26 @@ image_map = {
 
 # ===================== 拼接商品文本，供给AI Prompt =====================
 def _one_product_text(p):
-    """单件商品的文本。卖点截到 120 字，避免长卖点把 token 撑爆。"""
-    feats = (p.get("features_text_zh") or "")[:120]
+    """单件商品的文本。
+
+    卖点按【完整句子】截取，不按字符数硬切。
+    原因：事实一致性是本实验的底线，从字中间截断会产生残语句，
+    可能诱导模型补全或误读，进而编造出原文没有的信息。
+    这里改为取前若干条完整卖点，保证每条语义完整。
+    """
+    raw = (p.get("features_text_zh") or "").strip()
+    if raw:
+        segs = [s.strip() for s in raw.split("|") if s.strip()]
+        kept, total = [], 0
+        for s in segs:
+            # 每条卖点最多占 140 字，累计不超过 260 字，避免 token 膨胀
+            if total + len(s) > 260 and kept:
+                break
+            kept.append(s[:140])
+            total += len(s[:140])
+        feats = " | ".join(kept)
+    else:
+        feats = ""
     return (f"【{p['product_id']}】{p['name_zh']} | 价格${p['price_usd']} | "
             f"类目:{p['category_family_zh']} | cbf_score:{p['cbf_score']} | "
             f"卖点：{feats}")
@@ -450,9 +470,6 @@ def pick_products_for_prompt(user_text: str):
         if (w + "件") in t or (w + "个") in t:
             if idx < len(product_list):
                 return [product_list[idx]], "按序号命中第%d件" % (idx + 1)
-
-    # 5) 都没命中 -> 发全量
-    return product_list, "全量(未命中具体商品)"
 
     # 5) 都没命中 -> 发全量
     return product_list, "全量(未命中具体商品)"
@@ -566,7 +583,6 @@ if user_input:
     # 用户提问计数+1
     st.session_state.question_count += 1
 
-    st.session_state.chat_history.append({"role":"user","content":user_input})
     with st.chat_message("user"):
         st.write(user_input)
 
@@ -583,24 +599,56 @@ if user_input:
     ]
     # ---------- 历史对话只带最近 N 条（省钱核心之二）----------
     # 原先全量累积，聊到第 10 轮时光历史就上千 token。
-    history_tail = st.session_state.chat_history[-MAX_HISTORY_MESSAGES:] \
-        if MAX_HISTORY_MESSAGES > 0 else []
-    messages_api.extend(history_tail)
+    # 修复：历史取【本次提问之前的】对话，再单独追加本轮提问，
+    #      否则当前问题会被发送两次，模型容易答非所问或重复作答。
+    prior = st.session_state.chat_history
+    if MAX_HISTORY_MESSAGES > 0:
+        prior = prior[-MAX_HISTORY_MESSAGES:]
+    messages_api.extend(prior)
+    messages_api.append({"role": "user", "content": user_input})
+
+    # 落库放在组消息之后（保证顺序与界面一致）
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
 
     with st.chat_message("assistant"):
-        stream = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages_api,
-            stream=True,
-            temperature=0.3,
-            max_tokens=MAX_OUTPUT_TOKENS,                       # 限制输出长度
-            extra_body={
-                # OpenRouter 的推理开关：effort="none" 即关闭推理链。
-                # 注：DeepSeek 官方接口用的 thinking.type 写法在 OpenRouter 上无效。
-                "reasoning": {"effort": "high" if ENABLE_THINKING else "none"}
-            },
-        )
-        ai_response = st.write_stream(stream)
+        # ---- 免费模型延迟很长（实测单次约 70 秒），先给出等待提示，避免被试以为卡死 ----
+        tip = st.empty()
+        tip.caption("⏳ 助手正在思考，请稍候…（免费模型响应较慢，可能需要约一分钟）")
+        try:
+            stream = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages_api,
+                stream=True,
+                temperature=0.3,
+                max_tokens=MAX_OUTPUT_TOKENS,                       # 限制输出长度
+                timeout=180,                                        # 免费模型慢，放宽到3分钟
+                extra_body={
+                    # OpenRouter 的推理开关：effort="none" 即关闭推理链。
+                    # 注：DeepSeek 官方接口用的 thinking.type 写法在 OpenRouter 上无效。
+                    "reasoning": {"effort": "high" if ENABLE_THINKING else "none"}
+                },
+            )
+            tip.empty()
+            ai_response = st.write_stream(stream)
+        except Exception as e:
+            # ---- 任何失败都不让整页崩溃：给出中文提示，并撤回未成功的这轮提问 ----
+            tip.empty()
+            err = str(e)
+            st.error("AI 暂时没有响应，请稍后重试或直接选择商品。")
+            with st.expander("查看技术细节（仅供排查，被试可忽略）"):
+                st.code(err[:800])
+            if "429" in err:
+                st.warning("⚠️ 免费模型触发限流（429）。稍等一会儿再试，"
+                           "或换用付费模型以保证稳定。")
+            elif "402" in err:
+                st.warning("⚠️ 账户余额不足（402）。")
+            elif "Reasoning is mandatory" in err:
+                st.warning("⚠️ 当前模型强制开启推理链，与本程序冲突，请更换 MODEL_NAME。")
+            # 撤回本轮用户消息，避免界面上留下一条没有回答的提问
+            if (st.session_state.chat_history
+                    and st.session_state.chat_history[-1]["role"] == "user"):
+                st.session_state.chat_history.pop()
+            st.stop()
     st.session_state.chat_history.append({"role":"assistant","content":ai_response})
 
 
