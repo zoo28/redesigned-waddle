@@ -641,13 +641,19 @@ if user_input:
             # ---- 任何失败都不让整页崩溃：给出中文提示，并撤回未成功的这轮提问 ----
             tip.empty()
             err = str(e)
-            st.error("AI 暂时没有响应，请稍后重试或直接选择商品。")
+            # 免费额度用尽（free-models-per-day）是被试最可能遇到的状况，
+            # 单独区分出来，避免被试以为是自己操作错了而放弃实验。
+            if "free-models-per-day" in err or ("429" in err and "free" in err.lower()):
+                st.warning(
+                    "⚠️ 今日免费额度已用完，助手暂时无法回答。\n\n"
+                    "您可以**直接浏览上方商品并完成选择**，不影响实验的有效性；"
+                    "也可以稍后（明日额度重置后）再来体验。"
+                )
+            else:
+                st.error("AI 暂时没有响应，请稍后重试或直接选择商品。")
             with st.expander("查看技术细节（仅供排查，被试可忽略）"):
                 st.code(err[:800])
-            if "429" in err:
-                st.warning("⚠️ 免费模型触发限流（429）。稍等一会儿再试，"
-                           "或换用付费模型以保证稳定。")
-            elif "402" in err:
+            if "402" in err:
                 st.warning("⚠️ 账户余额不足（402）。")
             elif "Reasoning is mandatory" in err:
                 st.warning("⚠️ 当前模型强制开启推理链，与本程序冲突，请更换 MODEL_NAME。")
@@ -693,5 +699,4 @@ st.markdown(
 
 qr_col1, qr_col2, qr_col3 = st.columns([1, 1, 1])
 with qr_col2:
-    st.image("qrcode.jpg", width=220)
     st.image("qrcode.jpg", width=220)
