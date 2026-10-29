@@ -8,42 +8,27 @@ from openai import OpenAI
 import urllib.request          # 新增：用于把埋点上报到云端数据库
 
 # ===================== API配置区 =====================
-# 平台：OpenRouter（key 以 sk-or-v1- 开头），聚合多个模型供应商。
-# 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名必须带 :free 之类的后缀。
-API_KEY = "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"
-BASE_URL = "https://openrouter.ai/api/v1"
-# recursive/flint-v1.0:free —— 实测最佳，响应约 2~3 秒（比免费 nemotron 快 30 倍）
-#   实测：cost=0（真免费）、中文正常、价格引用准确。
-#   该模型的两条特殊约束，下面已专门处理，改动时不要破坏：
-#     1) 推理【无法关闭】，传 effort="none" 会直接 HTTP 400；
-#        因此 REASONING_EFFORT 只能设为 "low"。
-#     2) 每轮会消耗约 70~80 个推理 token，max_tokens 太小会把答案挤空
-#        （实测 max_tokens=200 时返回 content=None），故默认值调到 2000。
-#   备用：nvidia/nemotron-3.5-lightning:free（可关闭推理，但单次约 70 秒）
-MODEL_NAME = "recursive/flint-v1.0:free"
+# 平台：智谱 AI 开放平台（BigModel），国内平台，无需国际支付。
+# 接口兼容 OpenAI SDK，只需改 base_url 与模型名。
+API_KEY = "5d32123bc4524263852a85f228b0b18e.RrjlmJuAAYklW4EU"
+BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+# glm-4-flash —— 实测：响应 1~3 秒、流式首字 0.6 秒、中文优秀、价格引用准确。
+#   备选：glm-4.5-flash（更强但慢一点）、glm-4-air（快）、glm-4-plus（最快）。
+#   ⚠️ 不要用 glm-z1-flash：它会输出 <think> 思考标签，会污染回复内容。
+MODEL_NAME = "glm-4-flash"
 
 client = OpenAI(
     api_key=API_KEY,
     base_url=BASE_URL,
-    default_headers={                    # OpenRouter 要求/建议带上来源标识
-        "HTTP-Referer": "https://localhost",
-        "X-Title": "D1-Experiment",
-    },
 )
 
 # ---------- 成本控制参数 ----------
-# 1) 推理强度。OpenRouter 的写法是 reasoning.effort。
-#    ⚠️ flint 无法关闭推理（传 "none" 会 HTTP 400: Reasonable is mandatory），
-#       因此这里只能传 "low"，它会把推理压到约 70~80 token，速度最快。
-#    若换成 nemotron 这类可关闭推理的模型，可把 REASONING_EFFORT 改成 "none"。
-REASONING_EFFORT = "low"
+# 智谱接口不支持 OpenRouter 的 reasoning.effort 写法，且 glm-4-flash 本身
+# 不返回思考链，因此不需要推理开关参数（REASONING_EFFORT 已移除）。
 
-# 2) 单次回复最大长度。
-#    ⚠️ 必须给足空间：flint 会先用掉约 80 个推理 token，
-#       实测 max_tokens=200 时返回 content=None（答案被思考挤空）；
-#       1500 起才稳定返回完整答案。这里设 2000 留足余量。
-#    由于本模型免费，加大 max_tokens 不增加成本。
-MAX_OUTPUT_TOKENS = 2000
+# 单次回复最大长度。glm-4-flash 没有推理 token 占用，600 足够；
+# 留 800 让"理性分析型"做商品对比时不被截断。
+MAX_OUTPUT_TOKENS = 800
 
 # 3) 历史对话只带最近 N 条（一问一答算 2 条）。
 #    原先全量累积，聊到第 10 轮时光历史就上千 token。
@@ -619,7 +604,7 @@ if user_input:
     st.session_state.chat_history.append({"role": "user", "content": user_input})
 
     with st.chat_message("assistant"):
-        # ---- 给出等待提示，避免页面看起来卡死（flint 通常 2~3 秒返回）----
+        # ---- 给出等待提示，避免页面看起来卡死（glm-4-flash 通常 1~3 秒返回）----
         tip = st.empty()
         tip.caption("⏳ 助手正在思考，请稍候…")
         try:
@@ -628,12 +613,8 @@ if user_input:
                 messages=messages_api,
                 stream=True,
                 temperature=0.3,
-                max_tokens=MAX_OUTPUT_TOKENS,                       # 必须给足，flint 会消耗推理token
-                timeout=120,
-                extra_body={
-                    # OpenRouter 的推理强度。flint 唯一允许的值是 low（不能用 none）。
-                    "reasoning": {"effort": REASONING_EFFORT}
-                },
+                max_tokens=MAX_OUTPUT_TOKENS,
+                timeout=60,
             )
             tip.empty()
             ai_response = st.write_stream(stream)
@@ -641,22 +622,16 @@ if user_input:
             # ---- 任何失败都不让整页崩溃：给出中文提示，并撤回未成功的这轮提问 ----
             tip.empty()
             err = str(e)
-            # 免费额度用尽（free-models-per-day）是被试最可能遇到的状况，
-            # 单独区分出来，避免被试以为是自己操作错了而放弃实验。
-            if "free-models-per-day" in err or ("429" in err and "free" in err.lower()):
-                st.warning(
-                    "⚠️ 今日免费额度已用完，助手暂时无法回答。\n\n"
-                    "您可以**直接浏览上方商品并完成选择**，不影响实验的有效性；"
-                    "也可以稍后（明日额度重置后）再来体验。"
-                )
+            if "402" in err or "余额" in err or "balance" in err.lower():
+                st.warning("⚠️ 账户余额不足，请联系实验组织者充值后再试。")
+            elif "429" in err or "rate" in err.lower() or "并发" in err:
+                st.warning("⚠️ 请求过于频繁，已触发限流。请稍等几秒再试。")
+            elif "1113" in err or "余额不足" in err:
+                st.warning("⚠️ 智谱账户余额不足（错误码 1113）。")
             else:
                 st.error("AI 暂时没有响应，请稍后重试或直接选择商品。")
             with st.expander("查看技术细节（仅供排查，被试可忽略）"):
                 st.code(err[:800])
-            if "402" in err:
-                st.warning("⚠️ 账户余额不足（402）。")
-            elif "Reasoning is mandatory" in err:
-                st.warning("⚠️ 当前模型强制开启推理链，与本程序冲突，请更换 MODEL_NAME。")
             # 撤回本轮用户消息，避免界面上留下一条没有回答的提问
             if (st.session_state.chat_history
                     and st.session_state.chat_history[-1]["role"] == "user"):
