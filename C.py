@@ -10,7 +10,7 @@ import urllib.request          # 新增：用于把埋点上报到云端数据�
 # ===================== API配置区 =====================
 # 平台：OpenRouter（key 以 sk-or-v1- 开头），聚合多个模型供应商。
 # 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名也必须带前缀。
-API_KEY = "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"
+API_KEY = "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"
 BASE_URL = "https://openrouter.ai/api/v1"
 # deepseek/deepseek-v4.1-flash：OpenRouter 上 flash 档中定价最低的一档
 # （输入 $0.020/M、输出 $1.000/M）。实测可正常调用。
