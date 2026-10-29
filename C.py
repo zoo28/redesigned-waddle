@@ -10,7 +10,7 @@ import urllib.request          # 新增：用于把埋点上报到云端数据�
 # ===================== API配置区 =====================
 # 平台：OpenRouter（key 以 sk-or-v1- 开头），聚合多个模型供应商。
 # 注意：OpenRouter 的接口地址与 DeepSeek 官方不同，模型名必须带 :free 之类的后缀。
-API_KEY = "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"
+API_KEY = "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"
 BASE_URL = "https://openrouter.ai/api/v1"
 # recursive/flint-v1.0:free —— 实测最佳，响应约 2~3 秒（比免费 nemotron 快 30 倍）
 #   实测：cost=0（真免费）、中文正常、价格引用准确。
