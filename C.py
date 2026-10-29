@@ -350,11 +350,58 @@ if not st.session_state.agreed:
             st.session_state.start_timestamp = None
             st.session_state.question_count = 0
             st.session_state.agreed = True
+            # 置一个标记，让下一次渲染时把页面滚回顶部（见下方）
+            st.session_state._scroll_top = True
             st.rerun()
     with col2:
         st.button("❌不同意，退出实验", use_container_width=True, disabled=True)
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
+
+
+# ===================== 修复：从同意书进入主界面时自动滚回顶部 =====================
+# 原因：st.rerun() 会保留浏览器的滚动位置。同意书页面较短、主界面很长，
+#      切换后浏览器沿用了旧滚动位置，看起来就像"自动划到最下面"。
+# 做法：在 st.rerun() 前打一个标记，下一次渲染时注入 JS 把窗口滚回顶部，
+#      然后清掉标记，避免后续每次交互都强制回到顶部。
+def _scroll_to_top_once():
+    """仅在标记存在时注入一次回顶脚本。
+
+    说明：优先用 components.html（官方支持的 HTML 注入方式）；
+    若当前 Streamlit 版本取不到 components，则退回到 markdown 注入，
+    两种方式都不影响主流程。
+    """
+    _JS = """
+    <script>
+    (function () {
+        function toTop() {
+            try { window.parent.scrollTo({top: 0, behavior: "instant"}); } catch (e) {}
+            var doc = window.parent.document;
+            var nodes = doc.querySelectorAll(
+                'section.main, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main'
+            );
+            for (var i = 0; i < nodes.length; i++) {
+                try { nodes[i].scrollTop = 0; } catch (e) {}
+            }
+            try { doc.documentElement.scrollTop = 0; doc.body.scrollTop = 0; } catch (e) {}
+        }
+        toTop();
+        setTimeout(toTop, 60);
+        setTimeout(toTop, 300);
+    })();
+    </script>
+    """
+    try:
+        import streamlit.components.v1 as components
+        components.html(_JS, height=0)
+    except Exception:
+        # 兜底：用 markdown 注入（部分环境下 markdown 内的 script 不会执行，
+        # 但组件方式为主路径，这里只是避免整页报错）
+        st.markdown(_JS, unsafe_allow_html=True)
+
+
+if st.session_state.pop("_scroll_top", False):
+    _scroll_to_top_once()
 
 
 # ===================== 读取JSON商品数据集 =====================
