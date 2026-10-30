@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 import random
-from datetime import datetime
+from datetime import datetime, timezone, timedelta   # 新增 timezone/timedelta
 from openai import OpenAI
 import urllib.request          # 新增：用于把埋点上报到云端数据库
 
@@ -633,7 +633,10 @@ for i in range(0, len(product_list),5):
                     "price_usd": item["price_usd"],
                     "cbf_score": item["cbf_score"],
                     "decision_cost_sec": round(delta,2) if delta is not None else None,
-                    "select_time": end_time.strftime("%Y-%m-%d %H:%M:%S")
+                    # 附带 +08:00 偏移，避免 Supabase 按 UTC 解读导致早 8 小时
+                    "select_time": end_time.replace(
+                        tzinfo=timezone(timedelta(hours=8))
+                    ).strftime("%Y-%m-%d %H:%M:%S+08:00")
                 }
                 st.session_state.click_record.append(rec)
                 log_to_supabase(rec)      # 保留历史行为日志表
@@ -780,10 +783,7 @@ SCALE_ITEMS = [
 ]
 
 # 陷阱题（题目顺序与原问卷一致：第 7 位和第 12 位）
-TRAP_ITEMS = [
-    ("trap_1", "请直接选择很不满意", 1),
-    ("trap_2", "请直接选择很满意", 5),
-]
+TRAP_ITEMS = []   # 已按要求移除陷阱题
 
 DEMO = [
     ("gender", "1. 您的性别", ["男", "女"]),
@@ -793,25 +793,21 @@ DEMO = [
     ("shop_freq", "5. 您网购的频率", ["几乎不网购", "每月1~2次", "每月3~5次", "每周多次"]),
 ]
 
-# 题目呈现顺序（与原问卷一致：量表与陷阱题交错出现）
-# 用于按原样渲染，同时保证每道题都能被回答
+# 题目呈现顺序（5 道人口学 + 13 道量表 = 18 题）
 ITEM_ORDER = [
     ("demo", "gender"), ("demo", "age_group"), ("demo", "education"),
     ("demo", "ai_experience"), ("demo", "shop_freq"),
-    # 下面是原问卷 [11]~[25] 的顺序
     ("scale", "q_useful_1"),
     ("scale", "q_intent_1"),
     ("scale", "q_easy"),
     ("scale", "q_useful_2"),
     ("scale", "q_useful_3"),
     ("scale", "q_useful_4"),
-    ("trap",  "trap_1"),
     ("scale", "q_trust_1"),
     ("scale", "q_trust_2"),
     ("scale", "q_intent_2"),
     ("scale", "q_intent_3"),
     ("scale", "q_cont_1"),
-    ("trap",  "trap_2"),
     ("scale", "q_satis"),
     ("scale", "q_cont_2"),
 ]
@@ -824,14 +820,13 @@ def render_intake_questionnaire():
     """渲染站内问卷。返回提交时的数据字典，未提交返回 None。
 
     题目与顺序严格对应原问卷星问卷：
-      5 道人口学 → 13 道量表（含 2 道陷阱题交错其中）
+      5 道人口学 → 13 道量表
     """
     st.subheader(Q_TITLE)
     st.caption("请根据您刚才与 AI 助手的实际体验作答，约需 1 分钟。")
 
     demo_map = {f: (label, opts) for f, label, opts in DEMO}
     scale_map = {f: text for f, text, _ in SCALE_ITEMS}
-    trap_map = {f: text for f, text, _ in TRAP_ITEMS}
 
     with st.form("intake_form", clear_on_submit=False):
         answers = {}
@@ -855,10 +850,6 @@ def render_intake_questionnaire():
                 v = st.radio(scale_map[field], [1, 2, 3, 4, 5],
                              index=None, horizontal=True, key="sc_" + field)
                 answers[field] = v
-            elif kind == "trap":
-                v = st.radio(trap_map[field], [1, 2, 3, 4, 5],
-                             index=None, horizontal=True, key="tp_" + field)
-                answers[field] = v
 
         ok = st.form_submit_button("✅ 提交问卷", type="primary",
                                    use_container_width=True)
@@ -872,8 +863,6 @@ def render_intake_questionnaire():
         label_of[f] = label
     for f, text, _ in SCALE_ITEMS:
         label_of[f] = text
-    for f, text, _ in TRAP_ITEMS:
-        label_of[f] = text
 
     missing = [label_of[f] for f in label_of if answers.get(f) is None]
     if missing:
@@ -881,12 +870,6 @@ def render_intake_questionnaire():
                  % (len(missing), "\n- ".join(missing[:6])))
         return None
 
-    # ---- 陷阱题校验（不阻止提交，但记录是否通过；分析阶段可剔除）----
-    trap_ok = {}
-    for f, text, expect in TRAP_ITEMS:
-        trap_ok[f] = (answers.get(f) == expect)
-    answers["trap_passed"] = int(trap_ok.get("trap_1", False)
-                                 and trap_ok.get("trap_2", False))
     return answers
 
 
@@ -900,14 +883,28 @@ def build_final_record(ans: dict) -> dict:
     now = datetime.now()
     dur = (now - start).total_seconds() if start else None
 
+    # ---------- 时间戳统一带时区 ----------
+    # 说明：原先用 datetime.now().isoformat() 输出的是"无时区的本地时间"，
+    #      如 2026-10-30T09:47:07。Supabase 的 timestamptz 会把这种字符串
+    #      按 UTC 解读，导致北京时间（UTC+8）存进去后早 8 小时。
+    #      这里统一附带 +08:00 偏移，数据库会正确保存绝对时刻。
+    TZ = timezone(timedelta(hours=8))   # 北京时间
+
+    def local_iso(dt):
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        return dt.isoformat()
+
     out = {
         "user_id": uid,
         "ai_style": st.session_state.selected_style,
         "selected_product_id": last.get("product_id"),
         "decision_cost_sec": last.get("decision_cost_sec"),
         "question_count": st.session_state.question_count,
-        "started_at": start.isoformat() if start else None,
-        "submitted_at": now.isoformat(),
+        "started_at": local_iso(start),
+        "submitted_at": local_iso(now),
         "duration_sec": round(dur, 2) if dur is not None else None,
     }
     out.update(ans)
