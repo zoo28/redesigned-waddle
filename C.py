@@ -45,15 +45,11 @@ SUPABASE_KEY = "sb_publishable_xfm0TvH5W5-Qq5ZvvmkDVA_8lTfgWO9"
 # price_usd, cbf_score, decision_cost_sec, select_time, created_at
 
 
-def log_to_supabase(rec: dict) -> bool:
-    """把一条点击记录追加到云端表 click_log。
-
-    设计要点：任何失败都静默吞掉，绝不让被试看到报错、也绝不中断实验流程。
-    返回 True/False 仅供调试。
-    """
+def _supabase_insert(table: str, rec: dict, timeout: int = 6) -> bool:
+    """向 Supabase 指定表插入一行。失败静默返回 False，绝不中断实验。"""
     try:
         req = urllib.request.Request(
-            SUPABASE_URL + "/rest/v1/click_log",
+            SUPABASE_URL + "/rest/v1/" + table,
             data=json.dumps(rec, ensure_ascii=False).encode("utf-8"),
             headers={
                 "apikey": SUPABASE_KEY,
@@ -63,10 +59,27 @@ def log_to_supabase(rec: dict) -> bool:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return 200 <= resp.status < 300
     except Exception:
         return False
+
+
+def log_behavior_temp(rec: dict) -> bool:
+    """行为兜底：把点击行为写入 behavior_temp。
+    用途：被试若中途关闭页面、没填问卷，行为数据仍可追溯。"""
+    return _supabase_insert("behavior_temp", rec)
+
+
+def submit_results(rec: dict) -> bool:
+    """提交完整结果：一人一行，含行为 + 问卷全部字段。
+    写入 experiment_results 表。返回是否成功，供界面提示。"""
+    return _supabase_insert("experiment_results", rec, timeout=10)
+
+
+def log_to_supabase(rec: dict) -> bool:
+    """兼容旧调用：仍写入 click_log（保留历史行为日志表）。"""
+    return _supabase_insert("click_log", rec)
 
 
 # ===================== 实验任务情境（三组完全一致）=====================
@@ -350,58 +363,11 @@ if not st.session_state.agreed:
             st.session_state.start_timestamp = None
             st.session_state.question_count = 0
             st.session_state.agreed = True
-            # 置一个标记，让下一次渲染时把页面滚回顶部（见下方）
-            st.session_state._scroll_top = True
             st.rerun()
     with col2:
         st.button("❌不同意，退出实验", use_container_width=True, disabled=True)
     st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
-
-
-# ===================== 修复：从同意书进入主界面时自动滚回顶部 =====================
-# 原因：st.rerun() 会保留浏览器的滚动位置。同意书页面较短、主界面很长，
-#      切换后浏览器沿用了旧滚动位置，看起来就像"自动划到最下面"。
-# 做法：在 st.rerun() 前打一个标记，下一次渲染时注入 JS 把窗口滚回顶部，
-#      然后清掉标记，避免后续每次交互都强制回到顶部。
-def _scroll_to_top_once():
-    """仅在标记存在时注入一次回顶脚本。
-
-    说明：优先用 components.html（官方支持的 HTML 注入方式）；
-    若当前 Streamlit 版本取不到 components，则退回到 markdown 注入，
-    两种方式都不影响主流程。
-    """
-    _JS = """
-    <script>
-    (function () {
-        function toTop() {
-            try { window.parent.scrollTo({top: 0, behavior: "instant"}); } catch (e) {}
-            var doc = window.parent.document;
-            var nodes = doc.querySelectorAll(
-                'section.main, [data-testid="stAppViewContainer"], [data-testid="stMain"], .main'
-            );
-            for (var i = 0; i < nodes.length; i++) {
-                try { nodes[i].scrollTop = 0; } catch (e) {}
-            }
-            try { doc.documentElement.scrollTop = 0; doc.body.scrollTop = 0; } catch (e) {}
-        }
-        toTop();
-        setTimeout(toTop, 60);
-        setTimeout(toTop, 300);
-    })();
-    </script>
-    """
-    try:
-        import streamlit.components.v1 as components
-        components.html(_JS, height=0)
-    except Exception:
-        # 兜底：用 markdown 注入（部分环境下 markdown 内的 script 不会执行，
-        # 但组件方式为主路径，这里只是避免整页报错）
-        st.markdown(_JS, unsafe_allow_html=True)
-
-
-if st.session_state.pop("_scroll_top", False):
-    _scroll_to_top_once()
 
 
 # ===================== 读取JSON商品数据集 =====================
@@ -670,7 +636,15 @@ for i in range(0, len(product_list),5):
                     "select_time": end_time.strftime("%Y-%m-%d %H:%M:%S")
                 }
                 st.session_state.click_record.append(rec)
-                log_to_supabase(rec)      # 新增：同步写入云端总表（失败也不影响流程）
+                log_to_supabase(rec)      # 保留历史行为日志表
+                # 行为兜底：被试若中途关闭页面，此表仍有记录可追溯
+                log_behavior_temp({
+                    "user_id": rec["user_id"],
+                    "ai_style": rec["ai_style"],
+                    "product_id": rec["product_id"],
+                    "decision_cost_sec": rec["decision_cost_sec"],
+                    "question_count": rec["question_count"],
+                })
                 st.toast(f"已选择商品，决策耗时 {delta:.2f} 秒" if delta is not None else "已选择商品，尚未开始AI对话")
             st.markdown("</div>",unsafe_allow_html=True)
 
@@ -684,8 +658,24 @@ for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-user_input = st.chat_input("输入你的选购问题，和AI对话")
-if user_input:
+# ---------- 输入区 ----------
+# 改用 text_input + 按钮，替代原来的 st.chat_input。
+# 原因：st.chat_input 是 Streamlit 的"固定底部输入框"，首次出现时组件会自动获得焦点，
+#      浏览器随即把该元素滚入视野，导致点完"同意"进入主界面时页面直接跳到最底部。
+#      换用普通输入框后，页面不再自动滚动，交互体验与原来一致。
+with st.form("chat_form", clear_on_submit=True):
+    _c_in, _c_btn = st.columns([5, 1])
+    with _c_in:
+        user_input = st.text_input(
+            "输入你的选购问题，和AI对话",
+            placeholder="例如：这五件里哪件适合一年级孩子？",
+            label_visibility="collapsed",
+        )
+    with _c_btn:
+        _submitted = st.form_submit_button("发送", use_container_width=True)
+
+if _submitted and user_input and user_input.strip():
+    user_input = user_input.strip()
     # 用户发出第一条问题，才开启计时
     if st.session_state.start_timestamp is None:
         st.session_state.start_timestamp = datetime.now()
@@ -759,36 +749,195 @@ if user_input:
 
 st.divider()
 
-# 埋点已改为实时写入云端数据库（Supabase click_log 表），被试端不再展示也不提供导出：
-# 1) 展示埋点会让被试意识到自己被观察，属于实验设计泄露，会污染行为数据；
-# 2) 原来的本地导出写到服务器容器里，多用户相互覆盖且重启即丢失。
-# 数据请在 Supabase 后台 Table Editor → click_log → Export 导出。
+# ===================== 站内问卷（替代问卷星）=====================
+# 设计说明：
+#   把问卷从问卷星搬到网站内部，提交时连同网站行为一起写入 Supabase 的
+#   experiment_results 表，一人一行，user_id 天然唯一对应，无需人工导出。
+#   ⚠️ 题目与选项【与原问卷星问卷完全一致】，不增不减：
+#      5 道人口学 + 10 道量表 + 2 道陷阱题 = 17 题
+#   陷阱题的作用：识别乱填，不通过者可在分析阶段剔除。
 
-st.divider()
+Q_TITLE = "📝 步骤 4：请您填写问卷"
 
-# 问卷跳转，问卷星自定义参数 userid、aistyle
-st.subheader("📝 步骤4：完成实验填写问卷")
-uid = st.session_state.user_unique_id
-style = st.session_state.selected_style
-questionnaire_base_url = "https://v.wjx.cn/vm/hN66cXZ.aspx#"
-full_url = f"{questionnaire_base_url}?userid={uid}&aistyle={style}"
-st.markdown(f"> 携带ID问卷链接：`{full_url}`")
-st.link_button("👉跳转填写实验问卷", url=full_url, type="primary")
+# 量表统一锚点（1=很不同意 … 5=很同意）
+LK = ["很不同意", "不同意", "一般", "同意", "很同意"]
 
-# ===================== 问卷二维码 =====================
-# 用途：手机端被试扫码填写更方便；二维码与上方按钮指向同一个问卷地址。
-# 注意：qrcode.jpg 必须与 C.py 放在同一目录。
-st.markdown(
+# 量表题（字段名, 题干, 所属构念）—— 严格对应原问卷 [11]-[25] 区间
+SCALE_ITEMS = [
+    ("q_useful_1", "AI帮助我理清了思路", "感知有用性"),
+    ("q_intent_1", "我愿意采纳该AI给出的推荐", "采纳意愿"),
+    ("q_easy",     "使用该AI推荐系统对我来说操作容易", "易用性"),
+    ("q_useful_2", "AI提供的信息对我本次商品决策是有帮助的", "感知有用性"),
+    ("q_useful_3", "AI给出的信息减少了我搜集商品信息的负担", "感知有用性"),
+    ("q_useful_4", "AI提供的信息有助于我做出更好的选择", "感知有用性"),
+    ("q_trust_1",  "我认为该AI助手提供的产品信息是准确可靠的", "信任"),
+    ("q_trust_2",  "我相信这个AI助手给出的内容值得参考", "信任"),
+    ("q_intent_2", "我愿意参考AI助手给出的信息来选择商品", "采纳意愿"),
+    ("q_intent_3", "AI的建议对我本次的最终选择产生了影响", "采纳意愿"),
+    ("q_cont_1",   "如果下次做同类选购，我愿意继续使用该AI助手", "持续使用"),
+    ("q_satis",    "整体上，我对刚刚这次和AI助手的交互体验感到满意", "满意度"),
+    ("q_cont_2",   "未来我愿意继续使用这类AI推荐系统", "持续使用"),
+]
+
+# 陷阱题（题目顺序与原问卷一致：第 7 位和第 12 位）
+TRAP_ITEMS = [
+    ("trap_1", "请直接选择很不满意", 1),
+    ("trap_2", "请直接选择很满意", 5),
+]
+
+DEMO = [
+    ("gender", "1. 您的性别", ["男", "女"]),
+    ("age_group", "2. 您的年龄段", ["18-22岁", "23-28岁", "29-35岁", "36岁及以上"]),
+    ("education", "3. 您的最高学历", ["高中及以下", "大专", "本科", "硕士及以上"]),
+    ("ai_experience", "4. 您使用AI工具的经验", ["几乎不用", "偶尔使用", "经常使用", "高频使用"]),
+    ("shop_freq", "5. 您网购的频率", ["几乎不网购", "每月1~2次", "每月3~5次", "每周多次"]),
+]
+
+# 题目呈现顺序（与原问卷一致：量表与陷阱题交错出现）
+# 用于按原样渲染，同时保证每道题都能被回答
+ITEM_ORDER = [
+    ("demo", "gender"), ("demo", "age_group"), ("demo", "education"),
+    ("demo", "ai_experience"), ("demo", "shop_freq"),
+    # 下面是原问卷 [11]~[25] 的顺序
+    ("scale", "q_useful_1"),
+    ("scale", "q_intent_1"),
+    ("scale", "q_easy"),
+    ("scale", "q_useful_2"),
+    ("scale", "q_useful_3"),
+    ("scale", "q_useful_4"),
+    ("trap",  "trap_1"),
+    ("scale", "q_trust_1"),
+    ("scale", "q_trust_2"),
+    ("scale", "q_intent_2"),
+    ("scale", "q_intent_3"),
+    ("scale", "q_cont_1"),
+    ("trap",  "trap_2"),
+    ("scale", "q_satis"),
+    ("scale", "q_cont_2"),
+]
+
+if "results_submitted" not in st.session_state:
+    st.session_state.results_submitted = False
+
+
+def render_intake_questionnaire():
+    """渲染站内问卷。返回提交时的数据字典，未提交返回 None。
+
+    题目与顺序严格对应原问卷星问卷：
+      5 道人口学 → 13 道量表（含 2 道陷阱题交错其中）
     """
-<div style="margin-top:1.2rem;">
-    <p style="font-size:14px; color:#203855; margin-bottom:8px;">
-        📱 您也可以使用手机扫描下方二维码填写问卷：
-    </p>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+    st.subheader(Q_TITLE)
+    st.caption("请根据您刚才与 AI 助手的实际体验作答，约需 1 分钟。")
 
-qr_col1, qr_col2, qr_col3 = st.columns([1, 1, 1])
-with qr_col2:
-    st.image("qrcode.jpg", width=220)
+    demo_map = {f: (label, opts) for f, label, opts in DEMO}
+    scale_map = {f: text for f, text, _ in SCALE_ITEMS}
+    trap_map = {f: text for f, text, _ in TRAP_ITEMS}
+
+    with st.form("intake_form", clear_on_submit=False):
+        answers = {}
+        demo_started = False
+
+        for kind, field in ITEM_ORDER:
+            if kind == "demo":
+                if not demo_started:
+                    st.markdown("#### 一、基本信息")
+                    demo_started = True
+                label, opts = demo_map[field]
+                sel = st.radio(label, opts, index=None, horizontal=True,
+                               key="demo_" + field)
+                answers[field] = opts.index(sel) + 1 if sel is not None else None
+            elif kind == "scale":
+                if demo_started and "scale_note_shown" not in st.session_state:
+                    st.markdown("#### 二、使用体验")
+                    st.caption("请按 1～5 分评价您刚才的体验："
+                               "1=很不同意　2=不同意　3=一般　4=同意　5=很同意")
+                    st.session_state.scale_note_shown = True
+                v = st.radio(scale_map[field], [1, 2, 3, 4, 5],
+                             index=None, horizontal=True, key="sc_" + field)
+                answers[field] = v
+            elif kind == "trap":
+                v = st.radio(trap_map[field], [1, 2, 3, 4, 5],
+                             index=None, horizontal=True, key="tp_" + field)
+                answers[field] = v
+
+        ok = st.form_submit_button("✅ 提交问卷", type="primary",
+                                   use_container_width=True)
+
+    if not ok:
+        return None
+
+    # ---- 完整性校验：全部题目必须作答 ----
+    label_of = {}
+    for f, label, _ in DEMO:
+        label_of[f] = label
+    for f, text, _ in SCALE_ITEMS:
+        label_of[f] = text
+    for f, text, _ in TRAP_ITEMS:
+        label_of[f] = text
+
+    missing = [label_of[f] for f in label_of if answers.get(f) is None]
+    if missing:
+        st.error("还有 %d 题未作答，请完成后再次提交：\n\n- %s"
+                 % (len(missing), "\n- ".join(missing[:6])))
+        return None
+
+    # ---- 陷阱题校验（不阻止提交，但记录是否通过；分析阶段可剔除）----
+    trap_ok = {}
+    for f, text, expect in TRAP_ITEMS:
+        trap_ok[f] = (answers.get(f) == expect)
+    answers["trap_passed"] = int(trap_ok.get("trap_1", False)
+                                 and trap_ok.get("trap_2", False))
+    return answers
+
+
+def build_final_record(ans: dict) -> dict:
+    """把行为数据 + 问卷答案组装成一行完整记录"""
+    uid = st.session_state.user_unique_id
+    # 行为：取最后一次点击的商品（若点了多件）
+    recs = st.session_state.click_record
+    last = recs[-1] if recs else {}
+    start = st.session_state.get("start_timestamp")
+    now = datetime.now()
+    dur = (now - start).total_seconds() if start else None
+
+    out = {
+        "user_id": uid,
+        "ai_style": st.session_state.selected_style,
+        "selected_product_id": last.get("product_id"),
+        "decision_cost_sec": last.get("decision_cost_sec"),
+        "question_count": st.session_state.question_count,
+        "started_at": start.isoformat() if start else None,
+        "submitted_at": now.isoformat(),
+        "duration_sec": round(dur, 2) if dur is not None else None,
+    }
+    out.update(ans)
+    return out
+
+
+# ---------- 已提交：显示完成页 ----------
+if st.session_state.results_submitted:
+    st.success("✅ 问卷已提交，感谢您的参与！您可以关闭本页面。")
+    st.markdown(
+        "您的实验 ID：`%s`　　（如需要核对，可记录此编号）"
+        % st.session_state.user_unique_id
+    )
+else:
+    ans = render_intake_questionnaire()
+    if ans is not None:
+        record = build_final_record(ans)
+        ok = submit_results(record)
+        # 同时更新行为兜底表，确保即使结果表写入失败也留有痕迹
+        log_behavior_temp({
+            "user_id": record["user_id"],
+            "ai_style": record["ai_style"],
+            "product_id": record["selected_product_id"],
+            "decision_cost_sec": record["decision_cost_sec"],
+            "question_count": record["question_count"],
+        })
+        if ok:
+            st.session_state.results_submitted = True
+            st.rerun()
+        else:
+            st.error("提交失败，请检查网络后重试。您的答案已保留，无需重新填写。")
+            with st.expander("技术细节（仅供排查）"):
+                st.code(json.dumps(record, ensure_ascii=False, indent=2)[:800])
